@@ -1434,6 +1434,8 @@ impl JavaDoctor {
         candidates: &mut Vec<JavaCandidate>,
         seen: &mut HashSet<String>,
     ) {
+        Self::collect_gradle_property_candidates(candidates, seen);
+
         if let Some(home) = Self::user_home_dir() {
             Self::collect_root_and_children(
                 &home.join(".gradle").join("jdks"),
@@ -1441,8 +1443,9 @@ impl JavaDoctor {
                 candidates,
                 seen,
             );
+            let intellij_jdks_root = Self::gradle_intellij_jdks_dir(&home);
             Self::collect_root_and_children(
-                &home.join(".jdks"),
+                &intellij_jdks_root,
                 "tool:intellij-jdks",
                 candidates,
                 seen,
@@ -1498,7 +1501,218 @@ impl JavaDoctor {
                     seen,
                 );
             }
+
+            let gradle_maven_file = Self::gradle_maven_toolchains_file();
+            Self::collect_maven_toolchain_candidates(&home, gradle_maven_file, candidates, seen);
         }
+    }
+
+    fn collect_gradle_property_candidates(
+        candidates: &mut Vec<JavaCandidate>,
+        seen: &mut HashSet<String>,
+    ) {
+        if let Some(value) =
+            Self::read_nonempty_env(&["ORG_GRADLE_PROJECT_org_gradle_java_installations_fromEnv"])
+        {
+            for env_var_name in Self::parse_delimited_values(&value) {
+                if let Some(path) = env::var_os(&env_var_name).filter(|v| !v.is_empty()) {
+                    Self::push_candidate(
+                        candidates,
+                        seen,
+                        Self::resolve_user_defined_path(PathBuf::from(path)),
+                        "tool:gradle-from-env",
+                    );
+                }
+            }
+        }
+
+        if let Some(value) =
+            Self::read_nonempty_env(&["ORG_GRADLE_PROJECT_org_gradle_java_installations_paths"])
+        {
+            for path in Self::parse_delimited_values(&value) {
+                Self::push_candidate(
+                    candidates,
+                    seen,
+                    Self::resolve_user_defined_path(PathBuf::from(path)),
+                    "tool:gradle-paths",
+                );
+            }
+        }
+    }
+
+    fn gradle_intellij_jdks_dir(home: &Path) -> PathBuf {
+        if let Some(path) = Self::read_nonempty_env(&[
+            "ORG_GRADLE_PROJECT_org_gradle_java_installations_idea_jdks_directory",
+            "ORG_GRADLE_PROJECT_org_gradle_java_installations_idea-jdks-directory",
+        ]) {
+            return Self::resolve_user_defined_path(PathBuf::from(path));
+        }
+
+        if cfg!(target_os = "macos") {
+            home.join("Library")
+                .join("Java")
+                .join("JavaVirtualMachines")
+        } else {
+            home.join(".jdks")
+        }
+    }
+
+    fn gradle_maven_toolchains_file() -> Option<PathBuf> {
+        Self::read_nonempty_env(&[
+            "ORG_GRADLE_PROJECT_org_gradle_java_installations_maven_toolchains_file",
+            "ORG_GRADLE_PROJECT_org_gradle_java_installations_maven-toolchains-file",
+        ])
+        .map(PathBuf::from)
+        .map(Self::resolve_user_defined_path)
+    }
+
+    fn collect_maven_toolchain_candidates(
+        home: &Path,
+        gradle_file: Option<PathBuf>,
+        candidates: &mut Vec<JavaCandidate>,
+        seen: &mut HashSet<String>,
+    ) {
+        let mut files = Vec::new();
+        let mut seen_files = HashSet::new();
+
+        if let Some(path) = gradle_file {
+            Self::push_unique_path(&mut files, &mut seen_files, path);
+        }
+
+        if let Some(path) =
+            env::var_os("RJD_MAVEN_TOOLCHAINS_FILE").filter(|value| !value.is_empty())
+        {
+            Self::push_unique_path(
+                &mut files,
+                &mut seen_files,
+                Self::resolve_user_defined_path(PathBuf::from(path)),
+            );
+        }
+
+        if let Some(path) = env::var_os("M2_HOME").filter(|value| !value.is_empty()) {
+            Self::push_unique_path(
+                &mut files,
+                &mut seen_files,
+                Self::resolve_user_defined_path(PathBuf::from(path))
+                    .join("conf")
+                    .join("toolchains.xml"),
+            );
+        }
+
+        Self::push_unique_path(
+            &mut files,
+            &mut seen_files,
+            home.join(".m2").join("toolchains.xml"),
+        );
+
+        for file in files {
+            for path in Self::parse_maven_toolchains_file(&file) {
+                Self::push_candidate(candidates, seen, path, "tool:maven-toolchains");
+            }
+        }
+    }
+
+    fn parse_maven_toolchains_file(path: &Path) -> Vec<PathBuf> {
+        let Ok(content) = fs::read_to_string(path) else {
+            return Vec::new();
+        };
+
+        let mut homes = Vec::new();
+        let mut seen = HashSet::new();
+        let mut cursor = 0_usize;
+
+        while let Some(start_rel) = content[cursor..].find("<toolchain") {
+            let start = cursor + start_rel;
+            let Some(end_rel) = content[start..].find("</toolchain>") else {
+                break;
+            };
+            let end = start + end_rel + "</toolchain>".len();
+            let block = &content[start..end];
+
+            let tool_type = Self::extract_xml_tag_text(block, "type")
+                .map(|value| value.trim().to_ascii_lowercase());
+            if tool_type.as_deref() != Some("jdk") {
+                cursor = end;
+                continue;
+            }
+
+            if let Some(home) = Self::extract_xml_tag_text(block, "jdkHome")
+                .or_else(|| Self::extract_xml_tag_text(block, "jdkhome"))
+            {
+                let resolved = Self::resolve_env_placeholders(home.trim());
+                if !resolved.is_empty() {
+                    Self::push_unique_path(&mut homes, &mut seen, PathBuf::from(resolved));
+                }
+            }
+
+            cursor = end;
+        }
+
+        homes
+    }
+
+    fn read_nonempty_env(keys: &[&str]) -> Option<String> {
+        keys.iter().find_map(|key| {
+            env::var(key)
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        })
+    }
+
+    fn resolve_user_defined_path(path: PathBuf) -> PathBuf {
+        if path.is_absolute() {
+            return path;
+        }
+        if let Ok(cwd) = env::current_dir() {
+            return cwd.join(path);
+        }
+        path
+    }
+
+    fn extract_xml_tag_text<'a>(content: &'a str, tag: &str) -> Option<&'a str> {
+        let open = format!("<{tag}>");
+        let close = format!("</{tag}>");
+        let start = content.find(&open)?;
+        let value_start = start + open.len();
+        let end_rel = content[value_start..].find(&close)?;
+        let end = value_start + end_rel;
+        Some(&content[value_start..end])
+    }
+
+    fn resolve_env_placeholders(value: &str) -> String {
+        let mut output = String::new();
+        let mut rest = value;
+
+        while let Some(start) = rest.find("${env.") {
+            output.push_str(&rest[..start]);
+            let var_start = start + "${env.".len();
+            let Some(var_end_rel) = rest[var_start..].find('}') else {
+                output.push_str(&rest[start..]);
+                return output;
+            };
+            let var_end = var_start + var_end_rel;
+            let var_name = &rest[var_start..var_end];
+            if let Some(value) = env::var_os(var_name) {
+                output.push_str(&value.to_string_lossy());
+            } else {
+                output.push_str(&rest[start..=var_end]);
+            }
+            rest = &rest[var_end + 1..];
+        }
+
+        output.push_str(rest);
+        output
+    }
+
+    fn parse_delimited_values(value: &str) -> Vec<String> {
+        value
+            .split(',')
+            .flat_map(|part| part.lines())
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+            .map(ToOwned::to_owned)
+            .collect()
     }
 
     fn collect_runtime_bundle_candidates(
@@ -2315,6 +2529,57 @@ HKEY_LOCAL_MACHINE\SOFTWARE\Eclipse Adoptium\JDK\21.0.2+13\hotspot\MSI
         assert_eq!(
             adoptium,
             vec!["C:\\Program Files\\Eclipse Adoptium\\jdk-21.0.2.13-hotspot"]
+        );
+    }
+
+    #[test]
+    fn parse_maven_toolchains_file_reads_only_jdk_entries() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let toolchains = dir.path().join("toolchains.xml");
+        let xml = r#"
+<toolchains>
+  <toolchain>
+    <type>jdk</type>
+    <configuration>
+      <jdkHome>/opt/jdks/temurin-21</jdkHome>
+    </configuration>
+  </toolchain>
+  <toolchain>
+    <type>jre</type>
+    <configuration>
+      <jdkHome>/opt/jdks/ignored</jdkHome>
+    </configuration>
+  </toolchain>
+</toolchains>
+"#;
+        fs::write(&toolchains, xml).expect("write");
+
+        let parsed = JavaDoctor::parse_maven_toolchains_file(&toolchains);
+        assert_eq!(parsed, vec![PathBuf::from("/opt/jdks/temurin-21")]);
+    }
+
+    #[test]
+    fn parse_maven_toolchains_file_keeps_unresolved_env_placeholders() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let toolchains = dir.path().join("toolchains.xml");
+        let xml = r#"
+<toolchains>
+  <toolchain>
+    <type>jdk</type>
+    <configuration>
+      <jdkHome>${env.RJD_TEST_DOES_NOT_EXIST}/jdks/temurin-17</jdkHome>
+    </configuration>
+  </toolchain>
+</toolchains>
+"#;
+        fs::write(&toolchains, xml).expect("write");
+
+        let parsed = JavaDoctor::parse_maven_toolchains_file(&toolchains);
+        assert_eq!(
+            parsed,
+            vec![PathBuf::from(
+                "${env.RJD_TEST_DOES_NOT_EXIST}/jdks/temurin-17"
+            )]
         );
     }
 

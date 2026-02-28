@@ -399,26 +399,31 @@ fn run_compat(command: CompatCommand) -> i32 {
 }
 
 fn select_best_installation(report: &rjd::JavaDoctorReport) -> Option<&rjd::JavaInstallation> {
-    if let Some(runtime) = &report.detected_runtime
-        && let Some(entry) = report
-            .installations
-            .iter()
-            .find(|entry| entry.installation.path == runtime.path)
-    {
-        return Some(&entry.installation);
-    }
-
     report
         .installations
         .iter()
-        .map(|entry| &entry.installation)
-        .max_by_key(|install| {
+        .max_by_key(|entry| {
+            let install = &entry.installation;
             (
+                compat_source_priority(&entry.source),
                 parse_installed_version(&install.version),
                 install.is_jdk,
                 install.jvm_library_path.is_some(),
             )
         })
+        .map(|entry| &entry.installation)
+}
+
+fn compat_source_priority(source: &str) -> u8 {
+    if source.starts_with("env:") {
+        4
+    } else if source == "path:java" || source == "path:javac" {
+        3
+    } else if source.starts_with("windows:registry") {
+        2
+    } else {
+        1
+    }
 }
 
 fn parse_required_version(value: &str) -> Option<[u16; 4]> {
@@ -475,7 +480,7 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
-    fn select_best_installation_prefers_detected_runtime_path() {
+    fn select_best_installation_uses_javainfo_style_precedence() {
         let report = rjd::JavaDoctorReport {
             os: "linux".to_string(),
             arch: "x86_64".to_string(),
@@ -489,9 +494,9 @@ mod tests {
                 path_has_javac: true,
             },
             detected_runtime: Some(rjd::JavaDoctorDetectedRuntime {
-                path: PathBuf::from("/tmp/path-java"),
-                java_home: PathBuf::from("/tmp/path-home"),
-                version: "17.0.12".to_string(),
+                path: PathBuf::from("/tmp/path-java-21"),
+                java_home: PathBuf::from("/tmp/path-home-21"),
+                version: "21.0.2".to_string(),
                 vendor: "OpenJDK".to_string(),
                 source: "path:java".to_string(),
                 is_jdk: true,
@@ -505,9 +510,27 @@ mod tests {
             installations: vec![
                 rjd::JavaDiscovery {
                     installation: rjd::JavaInstallation {
-                        path: PathBuf::from("/tmp/path-java"),
-                        java_home: PathBuf::from("/tmp/path-home"),
+                        path: PathBuf::from("/tmp/env-java-17"),
+                        java_home: PathBuf::from("/tmp/env-home-17"),
                         version: "17.0.12".to_string(),
+                        vendor: "OpenJDK".to_string(),
+                        distribution: Some("OpenJDK".to_string()),
+                        build_scope: Some("OpenJDK".to_string()),
+                        arch: "64-bit".to_string(),
+                        is_64_bit: Some(true),
+                        is_jdk: true,
+                        jvm_library_path: None,
+                        loader_diagnostics: None,
+                    },
+                    source: "env:JAVA_HOME".to_string(),
+                    in_use: false,
+                    active_processes: Vec::new(),
+                },
+                rjd::JavaDiscovery {
+                    installation: rjd::JavaInstallation {
+                        path: PathBuf::from("/tmp/path-java-21"),
+                        java_home: PathBuf::from("/tmp/path-home-21"),
+                        version: "21.0.2".to_string(),
                         vendor: "OpenJDK".to_string(),
                         distribution: Some("OpenJDK".to_string()),
                         build_scope: Some("OpenJDK".to_string()),
@@ -521,29 +544,11 @@ mod tests {
                     in_use: false,
                     active_processes: Vec::new(),
                 },
-                rjd::JavaDiscovery {
-                    installation: rjd::JavaInstallation {
-                        path: PathBuf::from("/tmp/newest"),
-                        java_home: PathBuf::from("/tmp/newest-home"),
-                        version: "21.0.2".to_string(),
-                        vendor: "OpenJDK".to_string(),
-                        distribution: Some("OpenJDK".to_string()),
-                        build_scope: Some("OpenJDK".to_string()),
-                        arch: "64-bit".to_string(),
-                        is_64_bit: Some(true),
-                        is_jdk: true,
-                        jvm_library_path: None,
-                        loader_diagnostics: None,
-                    },
-                    source: "windows:registry".to_string(),
-                    in_use: false,
-                    active_processes: Vec::new(),
-                },
             ],
             sources: Vec::new(),
         };
 
         let selected = select_best_installation(&report).expect("selected");
-        assert_eq!(selected.path, PathBuf::from("/tmp/path-java"));
+        assert_eq!(selected.path, PathBuf::from("/tmp/env-java-17"));
     }
 }

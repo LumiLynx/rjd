@@ -10,6 +10,7 @@ Standalone Rust crate for Java runtime discovery and diagnostics.
 - `PATH` (`java`, `javac`)
 - OS-native locations (Linux/macOS/Windows)
 - Tool-managed installs (SDKMAN, asdf, jabba, Gradle, IntelliJ, mise)
+- Gradle property-backed inputs (`fromEnv`, `paths`, custom IntelliJ JDK dir, Maven toolchains file)
 - Runtime bundles (Minecraft/Hytale style runtime folders)
 
 Validation uses `java -XshowSettings:properties -version` first, then falls back to `java -version`.
@@ -50,7 +51,7 @@ Exit codes:
 
 ## Diagnostics
 
-In addition to plain runtime discovery:
+Extras currently shipped:
 
 - source attribution with per-source counters
 - optional active process correlation
@@ -69,4 +70,6 @@ In addition to plain runtime discovery:
 
 - Smoke checklist: `docs/WINDOWS_SMOKE.md`
 - PowerShell harness: `scripts/windows-smoke.ps1`
-- GitHub Actions CI: `.github/workflows/ci.yml` (includes Windows smoke run)
+- GitHub Actions CI: `.github/workflows/ci.yml` (lint, tests, release-build checks, Windows smoke)
+- Security audit workflow: `.github/workflows/security.yml` (scheduled `cargo audit`)
+- Release workflow: `.github/workflows/release.yml` (tagged multi-platform binaries + checksums)
