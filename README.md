@@ -69,6 +69,7 @@ Extras currently shipped:
 ## Windows Validation
 
 - Smoke checklist: `docs/WINDOWS_SMOKE.md`
+- Engineering deep dives: `docs/research/`
 - PowerShell harness: `scripts/windows-smoke.ps1`
 - GitHub Actions CI: `.github/workflows/ci.yml` (lint, tests, release-build checks, Windows smoke)
 - Security audit workflow: `.github/workflows/security.yml` (scheduled `cargo audit`)

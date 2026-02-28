@@ -1616,36 +1616,40 @@ impl JavaDoctor {
         let Ok(content) = fs::read_to_string(path) else {
             return Vec::new();
         };
+        let Ok(document) = roxmltree::Document::parse(&content) else {
+            return Vec::new();
+        };
 
         let mut homes = Vec::new();
         let mut seen = HashSet::new();
-        let mut cursor = 0_usize;
 
-        while let Some(start_rel) = content[cursor..].find("<toolchain") {
-            let start = cursor + start_rel;
-            let Some(end_rel) = content[start..].find("</toolchain>") else {
-                break;
-            };
-            let end = start + end_rel + "</toolchain>".len();
-            let block = &content[start..end];
-
-            let tool_type = Self::extract_xml_tag_text(block, "type")
-                .map(|value| value.trim().to_ascii_lowercase());
-            if tool_type.as_deref() != Some("jdk") {
-                cursor = end;
+        for toolchain in document.descendants().filter(|node| {
+            node.is_element() && node.tag_name().name().eq_ignore_ascii_case("toolchain")
+        }) {
+            let tool_type = toolchain.children().find_map(|node| {
+                if node.is_element() && node.tag_name().name().eq_ignore_ascii_case("type") {
+                    node.text().map(str::trim).filter(|value| !value.is_empty())
+                } else {
+                    None
+                }
+            });
+            if !matches!(tool_type, Some(value) if value.eq_ignore_ascii_case("jdk")) {
                 continue;
             }
 
-            if let Some(home) = Self::extract_xml_tag_text(block, "jdkHome")
-                .or_else(|| Self::extract_xml_tag_text(block, "jdkhome"))
-            {
-                let resolved = Self::resolve_env_placeholders(home.trim());
+            let jdk_home = toolchain.descendants().find_map(|node| {
+                if node.is_element() && node.tag_name().name().eq_ignore_ascii_case("jdkHome") {
+                    node.text().map(str::trim).filter(|value| !value.is_empty())
+                } else {
+                    None
+                }
+            });
+            if let Some(home) = jdk_home {
+                let resolved = Self::resolve_env_placeholders(home);
                 if !resolved.is_empty() {
                     Self::push_unique_path(&mut homes, &mut seen, PathBuf::from(resolved));
                 }
             }
-
-            cursor = end;
         }
 
         homes
@@ -1668,16 +1672,6 @@ impl JavaDoctor {
             return cwd.join(path);
         }
         path
-    }
-
-    fn extract_xml_tag_text<'a>(content: &'a str, tag: &str) -> Option<&'a str> {
-        let open = format!("<{tag}>");
-        let close = format!("</{tag}>");
-        let start = content.find(&open)?;
-        let value_start = start + open.len();
-        let end_rel = content[value_start..].find(&close)?;
-        let end = value_start + end_rel;
-        Some(&content[value_start..end])
     }
 
     fn resolve_env_placeholders(value: &str) -> String {
@@ -2581,6 +2575,26 @@ HKEY_LOCAL_MACHINE\SOFTWARE\Eclipse Adoptium\JDK\21.0.2+13\hotspot\MSI
                 "${env.RJD_TEST_DOES_NOT_EXIST}/jdks/temurin-17"
             )]
         );
+    }
+
+    #[test]
+    fn parse_maven_toolchains_file_handles_namespaced_tags() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let toolchains = dir.path().join("toolchains.xml");
+        let xml = r#"
+<mvn:toolchains xmlns:mvn="urn:test">
+  <mvn:toolchain>
+    <mvn:type>jdk</mvn:type>
+    <mvn:configuration>
+      <mvn:jdkHome>/opt/jdks/namespaced-21</mvn:jdkHome>
+    </mvn:configuration>
+  </mvn:toolchain>
+</mvn:toolchains>
+"#;
+        fs::write(&toolchains, xml).expect("write");
+
+        let parsed = JavaDoctor::parse_maven_toolchains_file(&toolchains);
+        assert_eq!(parsed, vec![PathBuf::from("/opt/jdks/namespaced-21")]);
     }
 
     #[test]
